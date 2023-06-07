@@ -107,7 +107,6 @@ const FAILED_EXT_URLS = new Set<string>();
 export async function determineExtension(path: string, headersOnly: boolean = true) {
   // Some typescript files don't have file extensions but you can't fetch a file without their file extension
   // so bundle tries to solve for that
-  const argPath = (suffix = "") => path + suffix;
   let url = path;
   let ext = "";
   let content: Uint8Array | undefined;
@@ -115,12 +114,12 @@ export async function determineExtension(path: string, headersOnly: boolean = tr
   let err: Error | undefined;
   for (let i = 0; i < endingVariantsLength; i++) {
     const endings = allEndingVariants[i];
-    const testingUrl = argPath(endings);
+    const testingUrl = path + endings;
 
     try {
-      if (FAILED_EXT_URLS.has(testingUrl)) {
-        continue;
-      }
+      // if (FAILED_EXT_URLS.has(testingUrl)) {
+      //   continue;
+      // }
 
       ({ url, content } = await fetchPkg(testingUrl, headersOnly ? { method: "HEAD" } : undefined));
       ext = extname(url) ?? "";

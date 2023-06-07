@@ -5,8 +5,8 @@ import { join, extname, dirname } from "node:path";
 import { resolve, exports, legacy, imports } from "resolve.exports";
 import { parse as parsePackageName } from "parse-package-name";
 
-import { getCDNUrl, isBareImport, inferLoader } from "./utils.js";
-import { determineExtension, getRequest } from "./fetch-and-cache.js";
+import { getCDNUrl, isBareImport, inferLoader } from "./utils.ts";
+import { determineExtension, getRequest } from "./fetch-and-cache.ts";
 
 const dir = dirname(fileURLToPath(import.meta.url));
 
