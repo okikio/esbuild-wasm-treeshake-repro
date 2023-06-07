@@ -2,12 +2,13 @@ import esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
 import { join, extname, dirname } from "node:path";
 
-import { resolve, exports, legacy, imports } from "resolve.exports";
+import { resolve, legacy } from "resolve.exports";
 import { parse as parsePackageName } from "parse-package-name";
 
 import { getCDNUrl, isBareImport, inferLoader } from "./utils.ts";
 import { determineExtension, getRequest } from "./fetch-and-cache.ts";
 
+import { resetFileSystem, setFileSystem } from "./filesystem.ts";
 const dir = dirname(fileURLToPath(import.meta.url));
 
 const config: esbuild.BuildOptions = {
@@ -37,6 +38,8 @@ const config: esbuild.BuildOptions = {
     "process.env.NODE_ENV": `"production"`,
   },
 }
+
+resetFileSystem({})
 await esbuild.initialize({});
 
 
@@ -51,7 +54,7 @@ console.groupEnd()
 const RESOLVED_URLs = new Map<string, string>()
 const FAILED_PKGJSON_URLs = new Set<string>()
 
-const FileSystem = new Map<string, string>()
+const VirtualFS = new Map<string, string>()
 const decoder = new TextDecoder()
 
 console.group("esbuild-wasm - w/ plugins")
@@ -68,7 +71,7 @@ await esbuild.build({
           const path = isBareImport(args.path) ? argPath : join(args.resolveDir, argPath)
           if (RESOLVED_URLs.has(path)) {
             return {
-              path: RESOLVED_URLs.get(argPath),
+              path: RESOLVED_URLs.get(path),
               namespace: 'cdn'
             }
           }
@@ -111,10 +114,10 @@ await esbuild.build({
 
                   pkg = await res.json();
 
-                  const pkgPath = "/node_modules" + new URL(res.url).pathname;
+                  const pkgPath = "/node_modules" + new URL(res.url).pathname.replace("@" + pkg.version, "");
                   if (!RESOLVED_URLs.has(url.href)) {
                     try {
-                      FileSystem.set(pkgPath, JSON.stringify(pkg))
+                      VirtualFS.set(pkgPath, JSON.stringify(pkg))
                       RESOLVED_URLs.set(url.href, pkgPath)
                       if (i == 0) isDirPkgJSON = true;
                     } catch (_e) { }
@@ -211,10 +214,10 @@ await esbuild.build({
             let content: Uint8Array | undefined, urlStr: string;
             ({ content, url: urlStr } = await determineExtension(url.toString(), false));
 
-            const filePath = "/node_modules" + new URL(urlStr).pathname;
+            const filePath = "/node_modules" + new URL(urlStr).pathname.replace(version, "");
             if (content) {
               try {
-                FileSystem.set(filePath, decoder.decode(content))
+                VirtualFS.set(filePath, decoder.decode(content))
                 RESOLVED_URLs.set(argPath, filePath)
               } catch (_e) { }
             }
@@ -231,11 +234,13 @@ await esbuild.build({
             let content: Uint8Array | undefined, urlStr: string;
             ({ content, url: urlStr } = await determineExtension(url.toString(), false));
 
-            const filePath = "/node_modules" + new URL(urlStr).pathname;
+            const resolvedUrl = new URL(urlStr);
+            const parsed = parsePackageName(resolvedUrl.pathname.replace(/^\//, ""));
+            const filePath = "/node_modules" + resolvedUrl.pathname.replace("@" + parsed.version, "");
             if (content) {
               try {
-                FileSystem.set(filePath, decoder.decode(content))
-                RESOLVED_URLs.set(argPath, filePath)
+                VirtualFS.set(filePath, decoder.decode(content))
+                RESOLVED_URLs.set(join(args.resolveDir, argPath), filePath)
               } catch (_e) { }
             }
 
@@ -249,11 +254,36 @@ await esbuild.build({
         // would probably need to be more complex.
         build.onLoad({ filter: /.*/, namespace: 'cdn' }, async (args) => {
           return {
-            contents: FileSystem.get(args.path),
+            contents: VirtualFS.get(args.path),
             loader: inferLoader(args.path),
             resolveDir: dirname(args.path),
           };
         });
+      },
+    }
+  ]
+});
+console.groupEnd()
+
+console.group("esbuild-wasm - w/ cache and plugins")
+
+setFileSystem(Object.fromEntries(VirtualFS.entries()))
+await esbuild.build({
+  ...config,
+  outfile: "dist/with-cache-bundle.js",
+  plugins: [
+    {
+      name: "cached-cdn",
+      setup(build) {
+        build.onResolve({ filter: /.*/ }, async (args) => {
+          // Support a different default CDN + allow for custom CDN url schemes
+          const { path: argPath } = getCDNUrl(args.path);
+          const path = isBareImport(args.path) ? argPath : join(args.resolveDir, argPath)
+          if (RESOLVED_URLs.has(path)) {
+            const filePath = RESOLVED_URLs.get(path);
+            return { path: filePath }
+          }
+        })
       },
     }
   ]
