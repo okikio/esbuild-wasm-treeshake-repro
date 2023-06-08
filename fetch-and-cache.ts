@@ -74,7 +74,7 @@ export async function fetchPkg(url: string, fetchOpts?: RequestInit) {
       if (!response.ok)
         throw new Error(`Couldn't load ${response.url || url} (${response.status} code)`);
   
-      console.log(`Fetch ${fetchOpts?.method === "HEAD" ? `(test)` : ""} ${response.url || url}`, "info");
+      console.log(`Fetch  ${response.url || url}`);
   
       return {
         // Deno doesn't have a `response.url` which is odd but whatever
@@ -98,7 +98,6 @@ const allEndingVariants = Array.from(new Set(fileEndings.map(ending => {
 }).flat()));
 
 const endingVariantsLength = allEndingVariants.length;
-const FAILED_EXT_URLS = new Set<string>();
 
 /**
  * Test the waters, what extension are we talking about here?
@@ -117,16 +116,10 @@ export async function determineExtension(path: string, headersOnly: boolean = tr
     const testingUrl = path + endings;
 
     try {
-      // if (FAILED_EXT_URLS.has(testingUrl)) {
-      //   continue;
-      // }
-
       ({ url, content } = await fetchPkg(testingUrl, headersOnly ? { method: "HEAD" } : undefined));
       ext = extname(url) ?? "";
       break;
     } catch (e) {
-      FAILED_EXT_URLS.add(testingUrl);
-
       if (i === 0) {
         err = e as Error;
       }

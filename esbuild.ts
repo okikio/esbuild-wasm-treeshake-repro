@@ -1,4 +1,4 @@
-import esbuild from "esbuild-wasm";
+import esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
 import { join, extname, dirname } from "node:path";
 
@@ -8,10 +8,7 @@ import { parse as parsePackageName } from "parse-package-name";
 import { getCDNUrl, isBareImport, inferLoader } from "./utils.ts";
 import { determineExtension, getRequest } from "./fetch-and-cache.ts";
 
-import { resetFileSystem, setFileSystem, toArr } from "./filesystem.ts";
-import { readFile } from "node:fs/promises";
 const dir = dirname(fileURLToPath(import.meta.url));
-
 const config: esbuild.BuildOptions = {
   entryPoints: [join(dir, "./src/index.ts")],
   target: ["esnext"],
@@ -40,7 +37,6 @@ const config: esbuild.BuildOptions = {
   },
 }
 
-resetFileSystem({})
 await esbuild.initialize({});
 
 
@@ -260,38 +256,6 @@ await esbuild.build({
             resolveDir: dirname(args.path),
           };
         });
-      },
-    }
-  ]
-});
-console.groupEnd()
-
-
-const entryPoint = config.entryPoints[0];
-resetFileSystem({ 
-  ...Object.fromEntries(VirtualFS.entries()),
-  ["/index.ts"]: await readFile(entryPoint, 'utf-8'),
-  ["/package.json"]: await readFile(join(dir, "./package.json"), 'utf-8'),
-})
-
-console.log(toArr())
-console.group("esbuild-wasm - w/ cache and plugins")
-await esbuild.build({
-  ...config,
-  outfile: "dist/with-cache-bundle.js",
-  plugins: [
-    {
-      name: "cached-cdn",
-      setup(build) {
-        build.onResolve({ filter: /.*/ }, async (args) => {
-          // Support a different default CDN + allow for custom CDN url schemes
-          const { path: argPath } = getCDNUrl(args.path);
-          const path = isBareImport(args.path) ? argPath : join(args.resolveDir, argPath)
-          if (RESOLVED_URLs.has(path)) {
-            const filePath = RESOLVED_URLs.get(path);
-            return { path: filePath }
-          }
-        })
       },
     }
   ]
