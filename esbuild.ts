@@ -1,259 +1,248 @@
-import esbuild from "esbuild";
+// Import necessary modules for the code.
+import esbuild from "esbuild-wasm"; // esbuild-wasm is too slow
 import { fileURLToPath } from "node:url";
 import { join, extname, dirname } from "node:path";
 
+// resolve and parse-package-name help in resolving packages and parsing package names respectively.
 import { resolve, legacy } from "resolve.exports";
 import { parse as parsePackageName } from "parse-package-name";
 
-import { getCDNUrl, isBareImport, inferLoader } from "./utils.ts";
-import { determineExtension, getRequest } from "./fetch-and-cache.ts";
+// Utility functions to handle URLs, infer the type of module loader, and to identify if a given path is a bare import.
+import { getCDNUrl, isBareImport, inferLoader, isNodeModule, isRelative, getFirstValidValue, legacyImportResolve, modernImportResolve, resolveRelativePath } from "./utils.ts";
 
+// Utility functions to determine the file extension of fetched resources and to make HTTP requests.
+import { fetchAndCacheContent, getRequest, urlCache, virtualFS } from "./fetch-and-cache.ts";
+
+// The directory of the current script.
 const dir = dirname(fileURLToPath(import.meta.url));
-const config: esbuild.BuildOptions = {
-  entryPoints: [join(dir, "./src/index.ts")],
-  target: ["esnext"],
-  format: "esm",
-  bundle: true,
-  minify: false,
-  treeShaking: false,
-  platform: "browser",
-  color: true,
-  globalName: "BundledCode",
-  logLevel: "info",
-  sourcemap: false,
 
-  metafile: true,
-  loader: {
-    ".png": "file",
-    ".jpeg": "file",
-    ".ttf": "file",
-    ".svg": "text",
-    ".html": "text",
-    ".scss": "css",
-  },
-  define: {
-    __NODE__: `false`,
-    "process.env.NODE_ENV": `"production"`,
-  },
+// Default build configuration options.
+const config: esbuild.BuildOptions = {
+  entryPoints: [join(dir, "./src/index.ts")],  // Entry point for the application.
+  target: ["esnext"],  // The output file will be compatible with esnext.
+
+  format: "esm",  // The output file will be in ECMAScript module format.
+  treeShaking: true,  // Tree shaking is disabled, so unused code will not be removed.
+  bundle: true, // Code will be bundled into a single file.
+
+  color: true,  // Enable colorful log output.
+  logLevel: "info",  // Logs of "info" level and above will be shown.
+  platform: "browser",  // The output file will be runnable in a browser.
 }
 
+// Initialize esbuild.
 await esbuild.initialize({});
 
+// Start logging group for esbuild without plugins.
+console.group("esbuild-wasm - no plugins");
 
-console.group("esbuild-wasm - no plugins")
+// Run esbuild without plugins.
 await esbuild.build({
   ...config,
-  outfile: "dist/no-plugin-bundle.js",
+  outfile: "dist/no-plugin-bundle.js",  // The output file will be written here.
 });
+
+// End logging group.
 console.groupEnd()
 
+// Start logging group for esbuild with plugins.
+console.group("esbuild-wasm - w/ plugins");
 
-const RESOLVED_URLs = new Map<string, string>()
-const FAILED_PKGJSON_URLs = new Set<string>()
+// Create cache of package.json URLs that have failed to load.
+const failedUrlCache = new Set<string>()
 
-const VirtualFS = new Map<string, string>()
-const decoder = new TextDecoder()
-
-console.group("esbuild-wasm - w/ plugins")
+// Run esbuild with plugins.
 await esbuild.build({
   ...config,
-  outfile: "dist/with-plugin-bundle.js",
+  outfile: "dist/with-plugin-bundle.js",  // The output file will be written here.
   plugins: [
     {
       name: "cdn",
       setup(build) {
+        // This block handles resolution of paths. It checks if the path is a bare import or a relative path,
+        // fetches the package.json files for bare imports and resolves the paths, caches the resolved paths,
+        // fetches the actual file content and caches that too.
         build.onResolve({ filter: /.*/ }, async (args) => {
-          // Support a different default CDN + allow for custom CDN url schemes
           const { path: argPath, origin } = getCDNUrl(args.path);
+
+          // Determine the path depending on whether it's a bare import (like 'react') or a relative/absolute path
           const path = isBareImport(args.path) ? argPath : join(args.resolveDir, argPath)
-          if (RESOLVED_URLs.has(path)) {
+
+          // Check if the URL for this path has already been resolved and cached.
+          // If so, return it. Otherwise, continue with resolution.
+          if (urlCache.has(path)) {
             return {
-              path: RESOLVED_URLs.get(path),
+              path: urlCache.get(path),
               namespace: 'cdn'
             }
           }
 
-          if (isBareImport(args.path)) {
-            // Heavily based off of https://github.com/egoist/play-esbuild/blob/main/src/lib/esbuild.ts
-            const parsed = parsePackageName(argPath);
-            let subpath = parsed.path;
-            let finalSubpath = subpath;
+          // The import is not in the cache, so resolve it. This may involve
+          // fetching the package.json file for the package from the CDN,
+          // parsing the package.json to find the entry point of the package,
+          // and constructing a full URL to the entry point on the CDN.
 
-            let pkg: any = {};
+          // If path is a bare import like 'react', resolve it to a full URL on a CDN.
+          if (isBareImport(args.path)) {
+            // Parse the package name (and optionally the version and file/subdirectory)
+            const parsed = parsePackageName(argPath);
+
+            let version = "@" + parsed.version;
+            let subpath = parsed.path;
+            let name = parsed.name;
 
             try {
-              const ext = extname(subpath);
-              const isDir = ext.length === 0;
-              const dir = isDir ? subpath : "";
+              // Here, the code attempts to fetch the package.json file for the package from the CDN.
+              // It uses several potential URLs, since the package.json file could be in different locations depending on the package structure.
+              // This section also manages a cache of failed package.json fetches to avoid repeating failed requests.
+              // All fetched package.json are stored in a virtual file system (VirtualFS) for future use.
 
-              const pkgJsonVariants = [
-                isDir ? `${parsed.name}@${parsed.version}${subpath}/package.json` : null,
+              const fileExtension = extname(parsed.path);
+              const isDirectory = fileExtension.length === 0;
+              const directory = isDirectory ? parsed.path : "";
+
+              // Defines potential package.json locations
+              const packageJsonLocations = [
+                isDirectory ? `${parsed.name}@${parsed.version}${parsed.path}/package.json` : null,
                 `${parsed.name}@${parsed.version}/package.json`
               ];
+              const uniquePackageJsonLocations = Array.from(new Set(packageJsonLocations))
+                .filter(location => location !== null);  // Filter out null locations
 
-              let isDirPkgJSON = false;
-              const pkgJsonVariantsLen = pkgJsonVariants.length;
-              for (let i = 0; i < pkgJsonVariantsLen; i++) {
-                const pkgJsonPath = pkgJsonVariants[i];
-                if (pkgJsonPath === null) continue; 
+              // Fetch all different package.json files in parallel
+              const packageJsonFetches = uniquePackageJsonLocations
+                .map(async (packageJsonLocation) => {  // Map each location to a Promise
+                  const isSubpathPackageJson = packageJsonLocation === packageJsonLocations[0];
+                  const { url } = getCDNUrl(packageJsonLocation, origin);
+                  const href = url.toString();
 
-                const { url } = getCDNUrl(pkgJsonPath, origin);
-                const { href } = url;
+                  if (urlCache.has(href)) {
+                    const pkgPath = urlCache.get(href);
+                    const pkg = virtualFS.get(pkgPath);
 
-                try {
-                  if (FAILED_PKGJSON_URLs.has(href) && i < pkgJsonVariantsLen - 1) {
-                    continue;
+                    return { pkg: JSON.stringify(pkg), isSubpathPackageJson };
                   }
 
-                  // Strongly cache package.json files
-                  const res = await getRequest(url, true);
-                  if (!res.ok) throw new Error(await res.text());
-
-                  pkg = await res.json();
-
-                  const pkgPath = "/node_modules" + new URL(res.url).pathname.replace("@" + pkg.version, "");
-                  if (!RESOLVED_URLs.has(url.href)) {
-                    try {
-                      VirtualFS.set(pkgPath, JSON.stringify(pkg))
-                      RESOLVED_URLs.set(url.href, pkgPath)
-                      if (i == 0) isDirPkgJSON = true;
-                    } catch (_e) { }
+                  // If the URL has previously failed, return a rejected Promise
+                  if (failedUrlCache.has(href)) {
+                    return Promise.reject(href);
                   }
-                  break;
-                } catch (e) {
-                  FAILED_PKGJSON_URLs.add(href);
 
-                  // If after checking all the different file extensions none of them are valid
-                  // Throw the first fetch error encountered, as that is generally the most accurate error
-                  if (i >= pkgJsonVariantsLen - 1)
-                    throw e;
-                }
+                  // Send the request and strongly cache package.json files
+                  const res = await getRequest(url);
+                  if (!res.ok) {
+                    // If the request fails, reject the Promise with the URL
+                    throw href;
+                  }
+
+                  // If successful, parse and cache the JSON response
+                  const pkg = await res.json();
+                  const pkgPath = "/node_modules" + new URL(res.url).pathname;
+                  virtualFS.set(pkgPath, JSON.stringify(pkg))
+                  urlCache.set(href, pkgPath)
+
+                  return { pkg, isSubpathPackageJson };
+                });
+
+              // Use Promise.allSettled to get results of all fetches
+              const results = await Promise.allSettled(packageJsonFetches);
+
+              // Filter out rejected Promises and retrieve their results
+              const successfulFetches = results
+                .filter(result => result.status === 'fulfilled')
+                .map(result => (result as PromiseFulfilledResult<Awaited<typeof packageJsonFetches[0]>>).value);
+
+              if (successfulFetches.length === 0) {
+                // If all fetches failed, add all URLs to the FAILED_PKGJSON_URLs set and throw an error
+                results.forEach(result => failedUrlCache.add((result as PromiseRejectedResult).reason));
+                throw new Error(`All package.json fetches failed`);
               }
 
-              const relativePath = subpath.replace(/^\//, "./");
+              // Use the first successful fetch
+              const { pkg, isSubpathPackageJson } = successfulFetches[0];
 
-              let modernResolve: ReturnType<typeof resolve> | void;
-              let legacyResolve: ReturnType<typeof legacy> | void;
+              version = version ?? "@" + pkg.version;
+              name = name ?? pkg.name;
 
-              let resolvedPath: string | void = subpath;
+              // The following block attempts to resolve the import by trying a number of different methods
+              // 1. Modern resolution using the "exports" field in package.json (if it exists)
+              // 2. Legacy resolution using other fields in package.json (if "exports" does not exist or fails)
+              // 3. Default to the relative path if both modern and legacy resolution fail
 
-              try {
-                // Resolving imports & exports from the package.json
-                // If an import starts with "#" then it"s a subpath-import, and should be treated as so
-                modernResolve = resolve(pkg, relativePath, { browser: true, conditions: ["module"] }) ||
-                  resolve(pkg, relativePath, { unsafe: true, conditions: ["deno", "worker", "production"] }) ||
-                  resolve(pkg, relativePath, { require: true });
+              // Start by converting the path to relative
+              let relativePath = resolveRelativePath(parsed.path);
+              // Assume the path is resolved initially
+              let resolvedPath: string | void = parsed.path;
 
-                if (modernResolve) {
-                  resolvedPath = Array.isArray(modernResolve) ? modernResolve[0] : modernResolve;
+              // Try resolving as a modern import
+              let modernResolve = modernImportResolve(pkg, relativePath);
+
+              // If modern resolution succeeded, use it
+              if (modernResolve) {
+                resolvedPath = Array.isArray(modernResolve) ? modernResolve[0] : modernResolve;
+                // If modern resolution failed and it's a subpath with a package.json, try legacy resolution
+              } else if (isSubpathPackageJson) {
+                let legacyResolve = legacyImportResolve(pkg);
+
+                // If legacy resolution succeeded, use it
+                if (legacyResolve) {
+                  // Check for any valid values in the resolved package
+                  const validValues = Object.values(legacyResolve).filter(x => x);
+                  // If there are no valid values, attempt legacy resolution again
+                  if (validValues.length <= 0) {
+                    legacyResolve = legacyImportResolve(pkg);
+                  }
+
+                  // Get the first valid value from the resolved package
+                  resolvedPath = getFirstValidValue(legacyResolve);
                 }
-                // deno-lint-ignore no-empty
-              } catch (e) { }
-
-              if (!modernResolve) {
-                // If the subpath has a package.json, and the modern resolve didn"t work for it
-                // we can safely use legacy resolve, 
-                // else, if the subpath doesn"t have a package.json, then the subpath is literal, 
-                // and we should just use the subpath as it is
-                if (isDirPkgJSON) {
-                  try {
-                    // Resolving using main, module, etc... from package.json
-                    legacyResolve = legacy(pkg, { browser: true }) ||
-                      legacy(pkg, { fields: ["unpkg", "bin"] });
-
-                    if (legacyResolve) {
-                      // Some packages have `browser` fields in their package.json which have some values set to false
-                      // e.g. typescript - > https://unpkg.com/browse/typescript@4.9.5/package.json
-                      if (typeof legacyResolve === "object") {
-                        const values = Object.values(legacyResolve);
-                        const validValues = values.filter(x => x);
-                        if (validValues.length <= 0) {
-                          legacyResolve = legacy(pkg);
-                        }
-                      }
-
-                      if (Array.isArray(legacyResolve)) {
-                        resolvedPath = legacyResolve[0];
-                      } else if (typeof legacyResolve === "object") {
-                        const legacyResults = legacyResolve;
-                        const allKeys = Object.keys(legacyResolve);
-                        const nonCJSKeys = allKeys.filter(key => {
-                          return !/\.cjs$/.exec(key) && !/src\//.exec(key) && legacyResults[key];
-                        });
-                        const keysToUse = nonCJSKeys.length > 0 ? nonCJSKeys : allKeys;
-                        resolvedPath = legacyResolve[keysToUse[0]] as string;
-                      } else {
-                        resolvedPath = legacyResolve;
-                      }
-                    }
-                  } catch (e) { }
-                } else resolvedPath = relativePath;
+                // If both resolutions failed, revert to the relative path
+              } else {
+                resolvedPath = relativePath;
               }
 
+              // If there is a resolved path, remove any leading "./"
               if (resolvedPath && typeof resolvedPath === "string") {
-                finalSubpath = resolvedPath.replace(/^(\.\/)/, "/");
+                subpath = resolvedPath.replace(/^(\.\/)/, "/");
               }
 
-              if (dir && isDirPkgJSON) {
-                finalSubpath = `${dir}${finalSubpath}`;
+              // If it's a directory and a subpath with a package.json, prepend the directory to the subpath
+              if (directory && isSubpathPackageJson) {
+                subpath = `${directory}${subpath}`;
               }
             } catch (e) {
               console.warn(e)
             }
 
-            // If the CDN is npm based then it should add the parsed version to the URL
-            // e.g. https://unpkg.com/spring-easing@v1.0.0/
-            const version = "@" + (pkg.version || parsed.version);
-            const { url } = getCDNUrl(`${parsed.name}${version}${finalSubpath}`, origin);
-
-            // Some typescript files don"t have file extensions but you can"t fetch a file without their file extension
-            // so bundle tries to solve for that
-            let content: Uint8Array | undefined, urlStr: string;
-            ({ content, url: urlStr } = await determineExtension(url.toString(), false));
-
-            const filePath = "/node_modules" + new URL(urlStr).pathname.replace(version, "");
-            if (content) {
-              try {
-                VirtualFS.set(filePath, decoder.decode(content))
-                RESOLVED_URLs.set(argPath, filePath)
-              } catch (_e) { }
-            }
+            const { url } = getCDNUrl(`${name}${version}${subpath}`, origin);
+            const filePath = await fetchAndCacheContent(url, argPath);
 
             return {
               path: filePath,
               namespace: 'cdn',
             }
-          } else if (args.path[0] === "." && /^\/node_modules/.test(args.importer)) {
+          }
+
+          // If path is a relative or absolute path (like './component' or '/utils'),
+          // resolve it relative to the current file's path.
+
+          // If the path is relative and the importer is in node_modules, convert it to a URL and fetch and cache the content
+          if (isRelative(args.path) && isNodeModule(args.importer)) {
+            // Resolve the path to a full URL on the CDN (we really only want pathname)
             const url = new URL(path.replace(/^\/node_modules/, ""), origin);
-
-            // Some typescript files don"t have file extensions but you can"t fetch a file without their file extension
-            // so bundle tries to solve for that
-            let content: Uint8Array | undefined, urlStr: string;
-            ({ content, url: urlStr } = await determineExtension(url.toString(), false));
-
-            const resolvedUrl = new URL(urlStr);
-            const parsed = parsePackageName(resolvedUrl.pathname.replace(/^\//, ""));
-            const filePath = "/node_modules" + resolvedUrl.pathname.replace("@" + parsed.version, "");
-            if (content) {
-              try {
-                VirtualFS.set(filePath, decoder.decode(content))
-                RESOLVED_URLs.set(join(args.resolveDir, argPath), filePath)
-              } catch (_e) { }
-            }
+            const filePath = await fetchAndCacheContent(url, join(args.resolveDir, argPath));
 
             return { path: filePath, namespace: 'cdn' }
           }
         })
 
-        // When a URL is loaded, we want to actually download the content
-        // from the internet. This has just enough logic to be able to
-        // handle the example import from https://cdn.esm.sh/ but in reality this
-        // would probably need to be more complex.
+        // Once a URL has been resolved, this block loads the actual content of the file from the CDN,
+        // using the virtual file system we set up earlier.
         build.onLoad({ filter: /.*/, namespace: 'cdn' }, async (args) => {
           return {
-            contents: VirtualFS.get(args.path),
-            loader: inferLoader(args.path),
-            resolveDir: dirname(args.path),
+            contents: virtualFS.get(args.path),  // Content of the file from our virtual file system.
+            loader: inferLoader(args.path),  // Use the loader inferred from the file extension.
+            resolveDir: dirname(args.path),  // The directory of the file for resolving relative paths.
           };
         });
       },

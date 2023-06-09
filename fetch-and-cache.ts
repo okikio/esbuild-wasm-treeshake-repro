@@ -1,137 +1,126 @@
+// Importing the 'extname' function from Node's 'path' module.
+// We use this to get the file extension of our resources.
 import { extname } from "node:path";
 
+// Define a Map to serve as a cache. We store the request URLs and their responses here.
 export const CACHE = new Map();
-export const CACHE_NAME = "EXTERNAL_FETCHES";
-export const SUPPORTS_CACHE_API = "caches" in globalThis;
-export const SUPPORTS_REQUEST_API = "Request" in globalThis;
 
+// A function that creates a unique key for each request, allowing us to cache them effectively.
 export function requestKey(request: RequestInfo) {
-    return SUPPORTS_REQUEST_API && request instanceof Request ? request.url.toString() : request.toString()
+  // If we can, we use the Request object's URL as a key, else we simply convert the request info to a string and use it as a key.
+  return request instanceof Request ? request.url : request;
 }
 
-export async function newRequest(request: RequestInfo, cache?: Cache, fetchOpts?: RequestInit) {
-    const networkResponse: Response = await fetch(request, fetchOpts);
+// Here's where we actually perform a network request for a resource.
+export async function newRequest(request: RequestInfo, clone = true) {
+  // Fetch the resource and store the response.
+  const networkResponse: Response = await fetch(request);
+  
+  if (clone) {
+    // If the Cache API isn't supported, we fall back to our Map-based cache.
+    CACHE.set(requestKey(request), networkResponse);
 
-    if (!fetchOpts?.method || (fetchOpts?.method && fetchOpts.method.toUpperCase() !== "GET"))
-        return networkResponse;
-
-    const clonedResponse = networkResponse.clone();
-    if (SUPPORTS_CACHE_API && cache) {
-        cache.put(request, clonedResponse);
-    } else {
-        const reqKey = requestKey(request);
-        CACHE.set(reqKey, clonedResponse);
-    }
-
+    // And finally, we return the original network response.
     return networkResponse;
+  } 
+
+  CACHE.set(requestKey(request), networkResponse);
 }
 
-export let OPEN_CACHE: Cache;
-export async function openCache() {
-    if (OPEN_CACHE) return OPEN_CACHE;
-    return (OPEN_CACHE = await globalThis.caches.open(CACHE_NAME));
-}
+// This function is what you'd call to get a resource, it manages both cache retrieval and network requests for you.
+export async function getRequest(url: RequestInfo | URL, permanent = false) {
+  // We first prepare our request. If the Request API is supported, we create a new Request object. If not, we just use the URL.
+  const request = new Request(url);
+  // Then, we check the cache for a response to this request.
+  let response = CACHE.get(requestKey(request));
 
-export async function getRequest(url: RequestInfo | URL, permanent = false, fetchOpts?: RequestInit) {
-    const request = SUPPORTS_REQUEST_API ? new Request(url.toString(), fetchOpts) : url.toString();
-    let response: Response;
-
-    let cache: Cache | undefined;
-    let cacheResponse: Response | undefined;
-
-    // In specific situations the browser will sometimes disable access to cache storage, 
-    // so, I create my own in memory cache
-    if (SUPPORTS_CACHE_API) {
-        cache = await openCache();
-        cacheResponse = await cache.match(request);
-    } else {
-        const reqKey = requestKey(request);
-        cacheResponse = CACHE.get(reqKey);
-    }
-
-    if (cacheResponse)
-        response = cacheResponse;
-
-    // If permanent is true, use the cache first and only go to the network if there is nothing in the cache, 
-    // otherwise, still use cache first, but in the background queue up a network request
-    if (!cacheResponse)
-        response = await newRequest(request, cache, fetchOpts);
-    else if (!permanent) {
-        newRequest(request, cache, fetchOpts);
-    }
-
-    return response!;
-}
-
-/**
- * Fetches packages and handles redirects
- * 
- * @param url package url to fetch
- */
-export async function fetchPkg(url: string, fetchOpts?: RequestInit) {
-    try {
-      const response = await getRequest(url, undefined, fetchOpts);
-      if (!response.ok)
-        throw new Error(`Couldn't load ${response.url || url} (${response.status} code)`);
-  
-      console.log(`Fetch  ${response.url || url}`);
-  
-      return {
-        // Deno doesn't have a `response.url` which is odd but whatever
-        url: response.url || url,
-        content: new Uint8Array(await response.arrayBuffer()),
-      };
-    } catch (err) {
-      throw new Error(`[getRequest] Failed at request (${url})\n${err.toString()}`);
-    }
+  // If the response isn't in the cache, we fetch it.
+  if (!response) {
+    response = await newRequest(request);
+  } else if (!permanent) {
+    // If the response is in the cache but not permanent, we make a new request to update the cache.
+    newRequest(request, false);
   }
-  
 
-// Imports have various extentions, fetch each extention to confirm what the user meant
-const fileEndings = ["", "/index"];
-const exts = ["", ".js", ".mjs", "/index.js", ".ts", ".tsx", ".cjs", ".d.ts"];
+  // We return the response!
+  return response!.clone();
+}
 
-// It's possible to have `./lib/index.d.ts` or `./lib/index.mjs`, and have a user enter use `./lib` as the import
-// It's very annoying but you have to check all variants
-const allEndingVariants = Array.from(new Set(fileEndings.map(ending => {
-  return exts.map(extension => ending + extension)
+// This function fetches the content of a package.
+export async function fetchPkg(url: string) {
+  // We use our getRequest function to fetch the package content.
+  const response = await getRequest(url);
+
+  // If the response isn't okay (HTTP 200), we throw an error.
+  if (!response.ok)
+    throw new Error(`Couldn't load ${response.url || url} (${response.status} code}`);
+
+  // For debug purposes, we log the URL we fetched.
+  console.log(`Fetch  ${response.url || url}`);
+
+  // We return an object containing the URL and the actual content.
+  return {
+    url: response.url || url,
+    content: new Uint8Array(await response.arrayBuffer()),
+  };
+}
+
+// We're preparing a list of possible file endings.
+// We use this to support a range of JavaScript and TypeScript files.
+const allEndingVariants = Array.from(new Set(["", "/index"].map(ending => {
+  return ["", ".js", ".mjs", "/index.js", ".ts", ".tsx", ".cjs", ".d.ts"].map(extension => ending + extension)
 }).flat()));
 
-const endingVariantsLength = allEndingVariants.length;
-
-/**
- * Test the waters, what extension are we talking about here?
- * @param path 
- */
-export async function determineExtension(path: string, headersOnly: boolean = true) {
-  // Some typescript files don't have file extensions but you can't fetch a file without their file extension
-  // so bundle tries to solve for that
+// This function helps us handle cases where file extensions aren't clear.
+export async function determineExtension(path: string) {
+  // Set up variables to hold the URL, file extension, and content of the fetched file.
   let url = path;
   let ext = "";
   let content: Uint8Array | undefined;
-
   let err: Error | undefined;
-  for (let i = 0; i < endingVariantsLength; i++) {
-    const endings = allEndingVariants[i];
+
+  // We try out all possible endings to fetch the correct file.
+  for (const endings of allEndingVariants) {
     const testingUrl = path + endings;
 
     try {
-      ({ url, content } = await fetchPkg(testingUrl, headersOnly ? { method: "HEAD" } : undefined));
+      // Use fetchPkg to fetch the resource, updating url and content variables.
+      ({ url, content } = await fetchPkg(testingUrl));
+      // Once a fetch is successful, get the file extension and break out of the loop.
       ext = extname(url) ?? "";
       break;
     } catch (e) {
-      if (i === 0) {
-        err = e as Error;
-      }
-
-      // If after checking all the different file extensions none of them are valid
-      // Throw the first fetch error encountered, as that is generally the most accurate error
-      if (i >= endingVariantsLength - 1) {
-        console.log((err ?? e).toString(), "error");
-        throw err ?? e;
-      }
+      // If there's an error, we save it to throw it later if we can't find a valid extension.
+      err = err || e;
     }
   }
 
-  return headersOnly ? { url, ext } : { url, content, ext };
+  // If we couldn't determine a valid extension, log the error and throw it.
+  if (!ext) {
+    // console.log(err.toString(), "error");
+    throw err;
+  }
+
+  // We return an object with the URL, the content, and the file extension.
+  return { url, content, ext };
+}
+
+
+// Create cache of URLs that have been resolved.
+export const urlCache = new Map<string, string>()
+
+// Create a virtual file system in memory to store content fetched from the CDN.
+export const virtualFS = new Map<string, string>()
+
+// Instantiate a TextDecoder to convert Uint8Array data to strings.
+export const decoder = new TextDecoder()
+
+// Function to fetch and cache content, reducing duplication
+export async function fetchAndCacheContent(url: URL, argPath: string) {
+  // Determines the correct extension for typescript files (which sometimes don't have extensions)
+  const { content, url: urlStr } = await determineExtension(url.toString());
+  const filePath = "/node_modules" + new URL(urlStr).pathname;
+  virtualFS.set(filePath, decoder.decode(content));
+  urlCache.set(argPath, filePath);
+  return filePath;
 }
