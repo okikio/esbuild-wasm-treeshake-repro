@@ -97,7 +97,7 @@ export async function determineExtension(path: string) {
 
   // If we couldn't determine a valid extension, log the error and throw it.
   if (!ext) {
-    // console.log(err.toString(), "error");
+    console.log(err.toString(), "error");
     throw err;
   }
 
