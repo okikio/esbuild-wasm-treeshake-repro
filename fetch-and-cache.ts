@@ -1,5 +1,6 @@
 // Importing the 'extname' function from Node's 'path' module.
 // We use this to get the file extension of our resources.
+import type { PackageJson } from "./esbuild.ts";
 import { extname } from "node:path";
 
 // Define a Map to serve as a cache. We store the request URLs and their responses here.
@@ -106,7 +107,7 @@ export async function determineExtension(path: string) {
 }
 
 // Create cache of URLs that have been resolved.
-export const urlCache = new Map<string, { path: string, sideEffects?: boolean }>()
+export const urlCache = new Map<string, { path: string, sideEffects?: boolean, pkg?: Partial<PackageJson> }>()
 
 // Create a virtual file system in memory to store content fetched from the CDN.
 export const virtualFS = new Map<string, string>()
@@ -115,11 +116,11 @@ export const virtualFS = new Map<string, string>()
 export const decoder = new TextDecoder()
 
 // Function to fetch and cache content, reducing duplication
-export async function fetchAndCacheContent(url: URL, argPath: string, sideEffects?: boolean) {
+export async function fetchAndCacheContent(url: URL, argPath: string, sideEffects?: boolean, pkg?: Partial<PackageJson>) {
   // Determines the correct extension for typescript files (which sometimes don't have extensions)
   const { content, url: urlStr } = await determineExtension(url.toString());
   const filePath = "/node_modules" + new URL(urlStr).pathname;
   virtualFS.set(filePath, decoder.decode(content));
-  urlCache.set(argPath, { path: filePath, sideEffects });
+  urlCache.set(argPath, { path: filePath, sideEffects, pkg });
   return filePath;
 }

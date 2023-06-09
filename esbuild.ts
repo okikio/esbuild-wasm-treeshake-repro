@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { join, extname, dirname } from "node:path";
 
 // resolve and parse-package-name help in resolving packages and parsing package names respectively.
-import { resolve, legacy } from "resolve.exports";
 import { parse as parsePackageName } from "parse-package-name";
 
 // Utility functions to handle URLs, infer the type of module loader, and to identify if a given path is a bare import.
@@ -12,6 +11,41 @@ import { getCDNUrl, isBareImport, inferLoader, isNodeModule, isRelative, getFirs
 
 // Utility functions to determine the file extension of fetched resources and to make HTTP requests.
 import { fetchAndCacheContent, getRequest, urlCache, virtualFS } from "./fetch-and-cache.ts";
+
+export type PackageJson = {
+  // The name of the package.
+  name: string;
+  // The version of the package.
+  version: string;
+  // A short description of the package.
+  description?: string;
+  // An array of keywords that describe the package.
+  keywords?: string[];
+  // The URL to the homepage of the package.
+  homepage?: string;
+  // The URL to the issue tracker and/or the email address to which issues should be reported.
+  bugs?: { url: string; email?: string } | { url?: string; email: string };
+  // The license identifier or a path/url to a license file for the package.
+  license?: string;
+  // The person or persons who authored the package. Can be a name, an email address, or an object with name, email and url properties.
+  author?: string | { name: string; email?: string; url?: string };
+  // An array of people who contributed to the package. Each element can be a name, an email address, or an object with name, email and url properties.
+  contributors?: Array<string | {
+    name: string; email?: string; url?:
+    string
+  }>;
+  // An array of files included in the package. Each element can be a file path or an object with include and exclude arrays of file paths. If this field is omitted, all files in the package root are included (except those listed in .npmignore or .gitignore).
+  files?: Array<string | { include: Array<string>; exclude: Array<string> }>;
+
+  // An object that maps package names to version ranges that the package depends on at runtime.
+  dependencies?: { [packageName: string]: string };
+  // An object that maps package names to version ranges that the package depends on for development purposes only.
+  devDependencies?: { [packageName: string]: string };
+  // An object that maps package names to version ranges that the package depends on optionally. If a dependency cannot be installed, npm will skip it and continue with the installation process.
+  optionalDependencies?: { [packageName: string]: string };
+  // An object that maps package names to version ranges that the package depends on if they are available in the same environment as the package. If a peer dependency is not met, npm will warn but not fail.
+  peerDependencies?: { [packageName: string]: string };
+}
 
 // The directory of the current script.
 const dir = dirname(fileURLToPath(import.meta.url));
@@ -74,7 +108,8 @@ await esbuild.build({
               namespace: 'cdn',
               sideEffects: cachedUrl.sideEffects,
               pluginData: {
-                sideEffects: cachedUrl.sideEffects
+                sideEffects: cachedUrl.sideEffects,
+                pkg: cachedUrl.pkg
               }
             }
           }
@@ -90,6 +125,27 @@ await esbuild.build({
           if (isBareImport(args.path)) {
             // Parse the package name (and optionally the version and file/subdirectory)
             const parsed = parsePackageName(argPath);
+
+            let oldPkg: PackageJson = args.pluginData?.pkg ?? {};
+            let newPkg: Partial<PackageJson> = Object.assign({}, oldPkg);
+
+            // Are there an dependecies???? Well Goood.
+            const depsExists = "dependencies" in oldPkg || 
+              "devDependencies" in oldPkg || 
+              "peerDependencies" in oldPkg;
+            if (depsExists && !/\S+@\S+/.test(argPath)) {
+              const {
+                devDependencies = {},
+                dependencies = {},
+                peerDependencies = {}
+              } = oldPkg;
+
+              const deps = Object.assign({}, devDependencies, peerDependencies, dependencies);
+              const keys = Object.keys(deps);
+
+              if (keys.includes(parsed.name))
+                parsed.version = deps[parsed.name];
+            }
 
             let version = "@" + parsed.version;
             let subpath = parsed.path;
@@ -159,8 +215,8 @@ await esbuild.build({
               // Use the first successful fetch
               const { pkg, isSubpathPackageJson } = successfulFetches[0];
 
-              version = version ?? "@" + pkg.version;
-              name = name ?? pkg.name;
+              version = pkg.version ? "@" + pkg.version : version;
+              name = pkg.name ?? name;
 
               // The following block attempts to resolve the import by trying a number of different methods
               // 1. Modern resolution using the "exports" field in package.json (if it exists)
@@ -210,12 +266,27 @@ await esbuild.build({
               }
 
               sideEffects = pkg.sideEffects;
+              newPkg = pkg;
             } catch (e) {
               console.warn(e)
             }
 
+            const deps = Object.assign({}, 
+              oldPkg.devDependencies, 
+              oldPkg.dependencies, 
+              oldPkg.peerDependencies
+            );
+            const peerDeps = newPkg.peerDependencies ?? {};
+
+            let peerDepsKeys = Object.keys(peerDeps);
+            for (const depKey of peerDepsKeys) {
+              peerDeps[depKey] = deps[depKey] ?? peerDeps[depKey];
+            }
+
+            let pkg = Object.assign({}, newPkg, peerDepsKeys.length > 0 ? { peerDependencies: peerDeps } : null)
+
             const { url } = getCDNUrl(`${name}${version}${subpath}`, origin);
-            const filePath = await fetchAndCacheContent(url, argPath, sideEffects);
+            const filePath = await fetchAndCacheContent(url, argPath, sideEffects, pkg);
 
             return {
               path: filePath,
@@ -223,6 +294,7 @@ await esbuild.build({
               sideEffects,
               pluginData: {
                 sideEffects,
+                pkg,
               }
             }
           }
@@ -234,15 +306,13 @@ await esbuild.build({
           if (isRelative(args.path) && isNodeModule(args.importer)) {
             // Resolve the path to a full URL on the CDN (we really only want pathname)
             const url = new URL(path.replace(/^\/node_modules/, ""), origin);
-            const filePath = await fetchAndCacheContent(url, join(args.resolveDir, argPath), sideEffects);
+            const filePath = await fetchAndCacheContent(url, join(args.resolveDir, argPath), sideEffects, args.pluginData?.pkg);
 
             return { 
               path: filePath, 
               namespace: 'cdn',
               sideEffects: sideEffects,
-              pluginData: {
-                sideEffects,
-              }
+              pluginData: args.pluginData
             }
           }
         })
