@@ -1,4 +1,4 @@
-import type { Loader } from 'esbuild-wasm';
+import type { Loader } from 'esbuild';
 import { resolve, legacy } from "resolve.exports";
 import { extname, isAbsolute, join } from 'node:path';
 

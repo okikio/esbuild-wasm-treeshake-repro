@@ -1,5 +1,5 @@
 // Import necessary modules for the code.
-import esbuild from "esbuild-wasm"; // esbuild-wasm is too slow
+import esbuild from "esbuild"; // esbuild-wasm is too slow
 import { fileURLToPath } from "node:url";
 import { join, extname, dirname } from "node:path";
 

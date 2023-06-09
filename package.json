@@ -17,7 +17,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.2.5",
-    "esbuild-wasm": "^0.17.19",
+    "esbuild": "^0.17.19",
     "parse-package-name": "^1.0.0",
     "resolve.exports": "^2.0.2"
   }
