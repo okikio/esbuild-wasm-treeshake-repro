@@ -283,8 +283,7 @@ await esbuild.build({
               peerDeps[depKey] = deps[depKey] ?? peerDeps[depKey];
             }
 
-            let pkg = Object.assign({}, newPkg, peerDepsKeys.length > 0 ? { peerDependencies: peerDeps } : null)
-
+            const pkg = Object.assign({}, newPkg, peerDepsKeys.length > 0 ? { peerDependencies: peerDeps } : null);
             const { url } = getCDNUrl(`${name}${version}${subpath}`, origin);
             const filePath = await fetchAndCacheContent(url, argPath, sideEffects, pkg);
 
