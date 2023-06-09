@@ -56,7 +56,7 @@ export async function fetchPkg(url: string) {
     throw new Error(`Couldn't load ${response.url || url} (${response.status} code}`);
 
   // For debug purposes, we log the URL we fetched.
-  // console.log(`Fetch  ${response.url || url}`);
+  console.log(`Fetch  ${response.url || url}`);
 
   // We return an object containing the URL and the actual content.
   return {
