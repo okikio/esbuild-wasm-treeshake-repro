@@ -56,7 +56,7 @@ export async function fetchPkg(url: string) {
     throw new Error(`Couldn't load ${response.url || url} (${response.status} code}`);
 
   // For debug purposes, we log the URL we fetched.
-  console.log(`Fetch  ${response.url || url}`);
+  // console.log(`Fetch  ${response.url || url}`);
 
   // We return an object containing the URL and the actual content.
   return {
@@ -105,9 +105,8 @@ export async function determineExtension(path: string) {
   return { url, content, ext };
 }
 
-
 // Create cache of URLs that have been resolved.
-export const urlCache = new Map<string, string>()
+export const urlCache = new Map<string, { path: string, sideEffects?: boolean }>()
 
 // Create a virtual file system in memory to store content fetched from the CDN.
 export const virtualFS = new Map<string, string>()
@@ -116,11 +115,11 @@ export const virtualFS = new Map<string, string>()
 export const decoder = new TextDecoder()
 
 // Function to fetch and cache content, reducing duplication
-export async function fetchAndCacheContent(url: URL, argPath: string) {
+export async function fetchAndCacheContent(url: URL, argPath: string, sideEffects?: boolean) {
   // Determines the correct extension for typescript files (which sometimes don't have extensions)
   const { content, url: urlStr } = await determineExtension(url.toString());
   const filePath = "/node_modules" + new URL(urlStr).pathname;
   virtualFS.set(filePath, decoder.decode(content));
-  urlCache.set(argPath, filePath);
+  urlCache.set(argPath, { path: filePath, sideEffects });
   return filePath;
 }

@@ -71,11 +71,18 @@ await esbuild.build({
           // Check if the URL for this path has already been resolved and cached.
           // If so, return it. Otherwise, continue with resolution.
           if (urlCache.has(path)) {
+            const cachedUrl = urlCache.get(path);
             return {
-              path: urlCache.get(path),
-              namespace: 'cdn'
+              path: cachedUrl.path,
+              namespace: 'cdn',
+              sideEffects: cachedUrl.sideEffects,
+              pluginData: {
+                sideEffects: cachedUrl.sideEffects
+              }
             }
           }
+
+          let sideEffects = args.pluginData?.sideEffects;
 
           // The import is not in the cache, so resolve it. This may involve
           // fetching the package.json file for the package from the CDN,
@@ -117,16 +124,16 @@ await esbuild.build({
                   const href = url.toString();
 
                   if (urlCache.has(href)) {
-                    const pkgPath = urlCache.get(href);
+                    const pkgPath = urlCache.get(href).path;
                     const pkg = virtualFS.get(pkgPath);
 
-                    return { pkg: JSON.stringify(pkg), isSubpathPackageJson };
+                    return { pkg: JSON.parse(pkg), isSubpathPackageJson };
                   }
 
                   // If the URL has previously failed, return a rejected Promise
-                  if (failedUrlCache.has(href)) {
-                    return Promise.reject(href);
-                  }
+                  // if (failedUrlCache.has(href)) {
+                  //   return Promise.reject(href);
+                  // }
 
                   // Send the request and strongly cache package.json files
                   const res = await getRequest(url);
@@ -139,7 +146,7 @@ await esbuild.build({
                   const pkg = await res.json();
                   const pkgPath = "/node_modules" + new URL(res.url).pathname;
                   virtualFS.set(pkgPath, JSON.stringify(pkg))
-                  urlCache.set(href, pkgPath)
+                  urlCache.set(href, { path: pkgPath })
 
                   return { pkg, isSubpathPackageJson };
                 });
@@ -154,7 +161,7 @@ await esbuild.build({
 
               if (successfulFetches.length === 0) {
                 // If all fetches failed, add all URLs to the FAILED_PKGJSON_URLs set and throw an error
-                results.forEach(result => failedUrlCache.add((result as PromiseRejectedResult).reason));
+                // results.forEach(result => failedUrlCache.add((result as PromiseRejectedResult).reason));
                 throw new Error(`All package.json fetches failed`);
               }
 
@@ -210,16 +217,22 @@ await esbuild.build({
               if (directory && isSubpathPackageJson) {
                 subpath = `${directory}${subpath}`;
               }
+
+              sideEffects = pkg.sideEffects;
             } catch (e) {
               console.warn(e)
             }
 
             const { url } = getCDNUrl(`${name}${version}${subpath}`, origin);
-            const filePath = await fetchAndCacheContent(url, argPath);
+            const filePath = await fetchAndCacheContent(url, argPath, sideEffects);
 
             return {
               path: filePath,
               namespace: 'cdn',
+              sideEffects,
+              pluginData: {
+                sideEffects,
+              }
             }
           }
 
@@ -230,9 +243,16 @@ await esbuild.build({
           if (isRelative(args.path) && isNodeModule(args.importer)) {
             // Resolve the path to a full URL on the CDN (we really only want pathname)
             const url = new URL(path.replace(/^\/node_modules/, ""), origin);
-            const filePath = await fetchAndCacheContent(url, join(args.resolveDir, argPath));
+            const filePath = await fetchAndCacheContent(url, join(args.resolveDir, argPath), sideEffects);
 
-            return { path: filePath, namespace: 'cdn' }
+            return { 
+              path: filePath, 
+              namespace: 'cdn',
+              sideEffects: sideEffects,
+              pluginData: {
+                sideEffects,
+              }
+            }
           }
         })
 
@@ -243,6 +263,7 @@ await esbuild.build({
             contents: virtualFS.get(args.path),  // Content of the file from our virtual file system.
             loader: inferLoader(args.path),  // Use the loader inferred from the file extension.
             resolveDir: dirname(args.path),  // The directory of the file for resolving relative paths.
+            pluginData: args.pluginData
           };
         });
       },
