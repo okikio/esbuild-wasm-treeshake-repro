@@ -48,9 +48,6 @@ console.groupEnd()
 // Start logging group for esbuild with plugins.
 console.group("esbuild-wasm - w/ plugins");
 
-// Create cache of package.json URLs that have failed to load.
-const failedUrlCache = new Set<string>()
-
 // Run esbuild with plugins.
 await esbuild.build({
   ...config,
@@ -130,11 +127,6 @@ await esbuild.build({
                     return { pkg: JSON.parse(pkg), isSubpathPackageJson };
                   }
 
-                  // If the URL has previously failed, return a rejected Promise
-                  // if (failedUrlCache.has(href)) {
-                  //   return Promise.reject(href);
-                  // }
-
                   // Send the request and strongly cache package.json files
                   const res = await getRequest(url);
                   if (!res.ok) {
@@ -161,7 +153,6 @@ await esbuild.build({
 
               if (successfulFetches.length === 0) {
                 // If all fetches failed, add all URLs to the FAILED_PKGJSON_URLs set and throw an error
-                // results.forEach(result => failedUrlCache.add((result as PromiseRejectedResult).reason));
                 throw new Error(`All package.json fetches failed`);
               }
 
